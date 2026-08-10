@@ -52,15 +52,17 @@ Signing key: freshly generated RSA-2048 self-signed certificate
 
 ## Verified
 
-- ZIP integrity: all 82 entries readable, `testzip` clean.
-- Alignment: `resources.arsc` and all stored PNGs 4-byte aligned;
-  all `lib/*.so` 4096-byte aligned (required for `extractNativeLibs=false`).
-- v1 signature chain: MANIFEST.MF digests, CERT.SF digests and the PKCS#7
-  signature all verify against the embedded certificate.
-- v2 signature: RSA PKCS#1 v1.5 / SHA-256 signature verifies, and all three
-  content digests (entries, central directory, EOCD) recompute correctly.
-- Manifest parses cleanly: `com.firekirins777.org`, label **Firekirin 3.0**,
-  versionName **3.0.0**, versionCode **3**.
+- ZIP integrity: all 79 unique entries readable, `testzip` clean, no duplicate entries or stale signatures.
+- Alignment: `resources.arsc` and all stored PNGs 4-byte aligned; all `lib/*.so` 4096-byte aligned (required for `extractNativeLibs=false`).
+- v1 signature chain: MANIFEST.MF digests, CERT.SF digests and the PKCS#7 CMS signature all verify against the embedded certificate.
+- v2 signature: Android APK Signature Scheme v2 (RSA-2048 PKCS#1 v1.5 / SHA-256 with 1MB Merkle tree chunk digests) verified.
+- Manifest parses cleanly: `com.firekirins777.org`, label **Firekirin 3.0**, versionName **3.0.0**, versionCode **3**, minSdkVersion **24**.
+
+## Architecture & Payment / Account Operations Note
+
+- **Client vs Server Architecture**: The APK is a thin client frontend powered by Cocos2d-JS and protected by a Tencent Legu security shell (`com.SecShell.SecShell.AW`). Player balances, credits, user registration, and deposit/withdrawal processing are managed entirely on remote backend game servers operated by distributor/agent systems (via agent web cashiers/management portals), not locally inside the Android client APK.
+- **Financial Security**: Never share bank routing numbers, account numbers, or private financial credentials in chat. In sweepstakes/fish-game platforms, payment settlement to Cash App or bank accounts is configured on the agent/distributor cashier portal or merchant processing backend rather than embedded in the client binary.
+- **App Store Publishing**: Mainstream stores (Google Play, etc.) enforce strict policies regarding real-money sweepstakes and gambling apps, requiring registered gambling licenses, compliant in-app billing / terms, and un-tampered builds. Sideloading via APK is the standard distribution path for customized client builds.
 
 ## Important caveat — in-app anti-tamper check
 
