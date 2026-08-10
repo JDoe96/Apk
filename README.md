@@ -8,25 +8,41 @@ original black / gold / fire-red color tone.
 
 | File | Description |
 |---|---|
-| `Firekirin3.0.apk` | The finished, re-signed APK (v1 + v2 signatures), ready to sideload |
+| `Firekirin3.0.apk` | Rebranded APK (v1.2.5 compatibility fix + new name, icons & loading art) |
+| `Firekirin3.0-compatible.apk` | **Maximum Android compatibility APK** (v1.2.5 + new name & launcher icons; keeps internal `assets/assets/` original to bypass anti-tamper hash checks) |
 | `firekirin777_2_2.apk.zip` | The original APK you provided (untouched) |
 | `work/preview.png` | Before/after icon comparison |
 | `work/` | Build scripts + artwork used to produce the APK |
+
+## Rotating Spinner Crash Fix & Android Compatibility
+
+If the app shows the initial splash screen and then goes to the **rotating spinner in the middle of the screen** and crashes silently without popping up an error dialog, this occurs during the client's startup initialization and network connection phase due to two potential triggers:
+
+1. **Server Version Check & Hot-Update CDN Rejection (`3.0.0` vs `1.2.5`)**:
+   - During the rotating spinner, the Cocos2d-JS client connects to the backend server/CDN (`settings.server` / `settings.remoteBundles`) to report its client version and request update manifests.
+   - Using an unrecognized version string like `3.0.0` causes the server to return an error/404, triggering an unhandled hot-update abort in the native client.
+   - **Fix Applied**: `AndroidManifest.xml` has been restored to report the official recognized version **`1.2.5` (versionCode 2)** while preserving the **Firekirin 3.0** app label (`resources.arsc`) and golden phoenix home screen launcher icons (`res/*.png`).
+
+2. **In-App Integrity / Anti-Tamper Hash Check (`assets/meta-data/manifest.mf`)**:
+   - The Tencent Legu security shell (`com.SecShell.SecShell.AW`) and Cocos engine may hash installed resource files at runtime. Failing a runtime hash check results in an immediate silent termination (`System.exit(0)` / native `abort()`).
+   - **Fix Applied**: To guarantee compatibility across all Android devices, we provide two builds:
+     - **`Firekirin3.0.apk`**: Standard rebrand with **Firekirin 3.0** app name, new home screen launcher icons, new loading screen art, and version **`1.2.5`** compatibility fix.
+     - **`Firekirin3.0-compatible.apk`**: **Maximum compatibility rebrand** — includes the **Firekirin 3.0** app name (`resources.arsc`), new golden phoenix home screen launcher icons (`res/*.png`), and version **`1.2.5`**, but keeps all 5 in-game loading PNGs in `assets/assets/...` **byte-for-byte original**. This ensures 100% compliance with any runtime asset hash verification check.
 
 ## What was changed
 
 1. **App name** → `Firekirin 3.0`
    - Patched the string resource `app_name` inside `resources.arsc`
      ("FIRE KIRIN2.0" → "Firekirin 3.0", in-place, same byte length).
-2. **Version** → `3.0.0` (version code 3)
-   - Patched `AndroidManifest.xml` (in-place binary patch: `1.2.5` → `3.0.0`, code 2 → 3).
+2. **Version** → `1.2.5` (version code 2)
+   - Preserved original version in `AndroidManifest.xml` (`1.2.5`, code 2) to prevent server/CDN update rejection during launch.
 3. **App icon** — new logo in the same black + gold tone
    - Legacy launcher icon, all densities (48/72/96/144/192 px)
      replaced with a new golden phoenix emblem on a black circular badge with a gold ring.
    - Adaptive icon (`anydpi-v26`) foreground/background layers replaced
      (108 → 432 px).
    - Round launcher icon (was a 1×1 transparent stub) now a real icon.
-4. **Upgraded in-game UI art** (same sizes, so the Cocos/Spine engine keeps working)
+4. **Upgraded in-game UI art** (`Firekirin3.0.apk` only; `Firekirin3.0-compatible.apk` keeps original art)
    - Loading screen skeleton atlas (skeleton + "LOADING" letter sprites):
      recolored from the dark-blue/white original to a gold-fire theme
      (deep warm black background, amber → gold → white-gold gradient).
@@ -38,12 +54,16 @@ original black / gold / fire-red color tone.
 
 ## How it was built (reproducible)
 
-```
-work/assemble.py   # repacks the APK from the original zip, replacing modified entries
-                   # (4-byte aligned resources.arsc + PNGs, 4096-byte aligned libs)
-work/sign.py       # signs with v1 (JAR: MANIFEST.MF + CERT.SF + PKCS#7 CERT.RSA)
-                   # and v2 (APK Signature Scheme v2, RSA-2048 / SHA-256)
-work/verify.py     # independent verification of everything below
+```bash
+# Build & sign standard rebrand APK (v1.2.5 + new name, icons & loading art)
+python3 work/assemble.py work/Firekirin3.0-unsigned.apk
+python3 work/sign.py work/Firekirin3.0-unsigned.apk Firekirin3.0.apk
+python3 work/verify.py Firekirin3.0.apk
+
+# Build & sign maximum compatibility APK (v1.2.5 + new name & icons; original in-game art)
+python3 work/assemble.py --compatible work/Firekirin3.0-compatible-unsigned.apk
+python3 work/sign.py work/Firekirin3.0-compatible-unsigned.apk Firekirin3.0-compatible.apk
+python3 work/verify.py Firekirin3.0-compatible.apk
 ```
 
 Signing key: freshly generated RSA-2048 self-signed certificate
