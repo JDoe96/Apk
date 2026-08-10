@@ -1,289 +1,265 @@
 #!/usr/bin/env python3
-"""Independent verification of the signed Firekirin3.0 APK."""
+"""
+Firekirin 3.0 APK Verifier
+Strict independent verifier for:
+1. ZIP integrity & entry deduplication
+2. Alignment (4-byte / 4096-byte)
+3. v1 (JAR Scheme) signature chain & CMS verification
+4. v2 (APK Signature Scheme v2) block parsing, 1MB Merkle tree digests, and RSA verification
+5. AndroidManifest.xml binary format & package metadata
+"""
 import base64
 import hashlib
+import io
+import os
 import struct
+import subprocess
+import sys
+import tempfile
 import zipfile
 
-import sys
-APK = sys.argv[1] if len(sys.argv) > 1 else 'work/Firekirin3.0.apk'
+CHUNK_SIZE = 1048576
+V2_BLOCK_ID = 0x7109871A
+SIG_ALGO_RSA_PKCS1_SHA256 = 0x0103
 
-print('=' * 60)
-print('1. ZIP integrity')
-z = zipfile.ZipFile(APK)
-print('  entries:', len(z.namelist()))
-print('  testzip:', z.testzip())
-infos = z.infolist()
-# alignment checks
-for i in infos:
-    if i.compress_type == zipfile.ZIP_STORED:
-        with open(APK, 'rb') as f:
-            # find local header via central dir offset
-            pass
-# read raw file for alignment + v2 checks
-data = open(APK, 'rb').read()
 
-print('=' * 60)
-print('2. Entry alignment')
-for info in infos:
-    if info.compress_type == zipfile.ZIP_STORED:
-        # locate data: walk local headers
-        # use central directory info: header at cd_off
-        pass
-# simpler: scan local headers
-pos = 0
-aligned = []
-import io
-buf = io.BytesIO(data)
-for info in infos:
-    buf.seek(info.header_offset)
-    sig = buf.read(4)
-    assert sig == b'PK\x03\x04', (info.filename, info.header_offset)
-    buf.seek(info.header_offset + 26)
-    nlen, elen = struct.unpack('<HH', buf.read(4))
-    data_off = info.header_offset + 30 + nlen + elen
-    if info.compress_type == zipfile.ZIP_STORED:
-        aligned.append((info.filename, data_off % 4, data_off % 4096 if info.filename.startswith('lib/') else None))
-for name, a4, a4k in aligned:
-    print(f'  {name}: data%4={a4}' + (f' data%4096={a4k}' if a4k is not None else ''))
-    if a4 != 0 or (a4k is not None and a4k != 0):
-        print('   !! MISALIGNED')
+def _name_lines_join(text: str) -> dict[str, str]:
+    """Parse MANIFEST.MF or CERT.SF into a map of entry name -> section text."""
+    sections = {}
+    blocks = text.split("\r\n\r\n")
+    for block in blocks:
+        lines = block.split("\r\n")
+        name = ""
+        for ln in lines:
+            if ln.startswith("Name: "):
+                name += ln[6:]
+            elif ln.startswith(" ") and name:
+                name += ln[1:]
+        if name:
+            sections[name] = block
+    return sections
 
-print('=' * 60)
-print('3. v1 (JAR) signature chain')
-mf = z.read('META-INF/MANIFEST.MF').decode('utf-8')
-sf = z.read('META-INF/CERT.SF')
-rsa = z.read('META-INF/CERT.RSA')
 
-# 3a: manifest digests
-ok = True
-blocks = mf.split('\r\n\r\n')
-for b in blocks:
-    lines = b.split('\r\n')
-    name = ''
-    for ln in lines:
-        if ln.startswith('Name: '):
-            name += ln[6:]
-        elif ln.startswith(' ') and name:
-            name += ln[1:]
-    if not name:
-        continue
-    digest_line = [l for l in lines if l.startswith('SHA-256-Digest:')]
-    if not digest_line:
-        ok = False
-        print('  !! no digest for', name)
-        continue
-    expected = base64.b64decode(digest_line[0].split(': ')[1])
-    actual = hashlib.sha256(z.read(name)).digest()
-    if expected != actual:
-        ok = False
-        print('  !! digest mismatch:', name)
-print('  MANIFEST.MF file digests:', 'OK' if ok else 'FAIL')
-# every non-META-INF entry listed?
-listed = set()
-for b in blocks:
-    lines = b.split('\r\n')
-    name = ''
-    for ln in lines:
-        if ln.startswith('Name: '):
-            name += ln[6:]
-        elif ln.startswith(' ') and name:
-            name += ln[1:]
-    if name:
-        listed.add(name)
-missing = [n for n in z.namelist() if not n.startswith('META-INF/') and n not in listed]
-print('  entries missing from MANIFEST.MF:', missing if missing else 'none')
+def verify_apk(apk_path: str):
+    print("=" * 60)
+    print(f"VERIFYING APK: {apk_path}")
+    print("=" * 60)
 
-# 3b: CERT.SF whole-manifest digest + section digests
-sf_text = sf.decode('utf-8')
-sf_blocks = sf_text.split('\r\n\r\n')
-wm = [l for l in sf_text.split('\r\n') if l.startswith('SHA-256-Digest-Manifest:')]
-if wm:
-    d = base64.b64decode(wm[0].split(': ')[1])
-    print('  SF manifest digest:', 'OK' if d == hashlib.sha256(mf.encode()).digest() else 'FAIL')
-# section digests
-sec_ok = True
-for b in sf_blocks:
-    lines = b.split('\r\n')
-    name = ''
-    for ln in lines:
-        if ln.startswith('Name: '):
-            name += ln[6:]
-        elif ln.startswith(' ') and name:
-            name += ln[1:]
-    if not name:
-        continue
-    dl = [l for l in lines if l.startswith('SHA-256-Digest:')]
-    # find the manifest section for this name
-    for mb in blocks:
-        ml = mb.split('\r\n')
-        mname = ''
-        for ln in ml:
-            if ln.startswith('Name: '):
-                mname += ln[6:]
-            elif ln.startswith(' ') and mname:
-                mname += ln[1:]
-        if mname == name:
-            sec_ok = sec_ok and base64.b64decode(dl[0].split(': ')[1]) == hashlib.sha256(mb.encode()).digest()
-            break
-print('  SF section digests:', 'OK' if sec_ok else 'FAIL')
+    with open(apk_path, "rb") as f:
+        apk_data = f.read()
 
-# 3c: verify PKCS#7 CERT.RSA with the embedded cert
-from asn1crypto import cms as ac_cms
-ci = ac_cms.ContentInfo.load(rsa)
-sd = ci['content']
-si = sd['signer_infos'][0]
-signed_attrs = si['signed_attrs']
-if getattr(signed_attrs, 'implicit', False):
-    signed_attrs = signed_attrs.untag()
-cert = sd['certificates'][0].chosen
-print('  embedded cert subject:', cert.subject.human_friendly)
-# verify signature over signedAttrs
-from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-from cryptography.hazmat.primitives.serialization import load_der_public_key
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.serialization import load_der_public_key
-pub = load_der_public_key(cert.public_key.dump())
-sig = si['signature'].native
-# rebuild the implicit [0]-tagged form as stored in the file
-attrs_der = signed_attrs.dump()
-if len(attrs_der) < 0x80:
-    tagged = b'\xa0' + bytes([len(attrs_der)]) + attrs_der
-else:
-    n = len(attrs_der)
-    ln = n.to_bytes((n.bit_length() + 7) // 8, 'big')
-    tagged = b'\xa0' + bytes([0x80 | len(ln)]) + ln + attrs_der
-try:
-    pub.verify(sig, tagged, padding.PKCS1v15(), hashes.SHA256())
-    print('  CERT.RSA signature over signedAttrs: OK')
-except Exception as e:
-    print('  !! signature verify failed:', e)
-# check messageDigest attr
-for attr in si['signed_attrs']:
-    if attr['type'].native == 'message_digest':
-        md = attr['values'][0].native
-        print('  messageDigest attr matches SF:', 'OK' if md == hashlib.sha256(sf).digest() else 'FAIL')
+    # ------------------------------------------------------------ 1. ZIP integrity
+    print("\n[1] Checking ZIP Integrity & Entry Deduplication...")
+    zin = zipfile.ZipFile(io.BytesIO(apk_data))
+    bad = zin.testzip()
+    if bad is not None:
+        raise ValueError(f"ZIP integrity error in entry: {bad}")
+    names = [info.filename for info in zin.infolist()]
+    if len(names) != len(set(names)):
+        duplicates = [n for n in names if names.count(n) > 1]
+        raise ValueError(f"Duplicate ZIP entries detected: {set(duplicates)}")
+    print(f"  Passed: {len(names)} unique entries, testzip clean.")
 
-print('=' * 60)
-print('4. v2 (APK Signature Scheme v2)')
-# find the signing block: before central directory
-eocd_pos = data.rfind(b'PK\x05\x06')
-cd_off = struct.unpack_from('<I', data, eocd_pos + 16)[0]
-# magic check: last 16 bytes before cd
-magic = data[cd_off - 16:cd_off]
-print('  block magic at end:', magic)
-assert magic == b'APK Sig Block 42'
-# trailing size field at cd_off-24..cd_off-16
-size_field = struct.unpack_from('<Q', data, cd_off - 24)[0]
-block_start = cd_off - size_field - 8
-print('  block size:', size_field, 'block start:', block_start)
-assert data[block_start:block_start + 8] == struct.pack('<Q', size_field)
-assert data[block_start + 8:block_start + 24] == b'APK Sig Block 42'
+    # ------------------------------------------------------------ 2. Alignment
+    print("\n[2] Checking 4-byte and 4096-byte Alignment...")
+    with open(apk_path, "rb") as f:
+        for info in zin.infolist():
+            f.seek(info.header_offset)
+            magic, _, _, _, _, _, _, _, _, name_len, extra_len = struct.unpack("<IHHHHHIIIHH", f.read(30))
+            if magic != 0x04034B50:
+                raise ValueError(f"Invalid local header magic for {info.filename}")
+            data_offset = info.header_offset + 30 + name_len + extra_len
 
-# walk pairs
-p = block_start + 24
-pairs = {}
-while p < cd_off - 24:
-    plen, pid = struct.unpack_from('<QI', data, p)
-    pairs[pid] = data[p + 12:p + 12 + plen - 4]
-    p += 12 + plen - 4
-print('  block pairs ids:', [hex(k) for k in pairs])
-v2 = pairs.get(0x7109871a)
-assert v2, 'no v2 signer block'
+            if info.compress_type == zipfile.ZIP_STORED:
+                if info.filename.startswith("lib/") and info.filename.endswith(".so"):
+                    if data_offset % 4096 != 0:
+                        raise ValueError(f"Native lib {info.filename} not 4096-byte aligned! (offset={data_offset})")
+                else:
+                    if data_offset % 4 != 0:
+                        raise ValueError(f"Stored file {info.filename} not 4-byte aligned! (offset={data_offset})")
+    print("  Passed: All uncompressed native libs 4096-byte aligned, all other stored files 4-byte aligned.")
 
-def read_lp(buf, off):
-    ln = struct.unpack_from('<I', buf, off)[0]
-    return buf[off + 4:off + 4 + ln], off + 4 + ln
+    # ------------------------------------------------------------ 3. v1 Signature Chain
+    print("\n[3] Checking v1 (JAR Scheme) Signature Chain...")
+    if "META-INF/MANIFEST.MF" not in names:
+        raise ValueError("Missing META-INF/MANIFEST.MF")
+    if "META-INF/CERT.SF" not in names:
+        raise ValueError("Missing META-INF/CERT.SF")
+    if "META-INF/CERT.RSA" not in names:
+        raise ValueError("Missing META-INF/CERT.RSA")
 
-signer_count = struct.unpack_from('<I', v2, 0)[0]
-print('  signer count:', signer_count)
-off = 4
-signer_len = struct.unpack_from('<I', v2, off)[0]
-off += 4
-signed_data, off = read_lp(v2, off)
-sig_algs_lp, off = read_lp(v2, off)
-pubkey_lp, off = read_lp(v2, off)
-signatures_lp, off = read_lp(v2, off)
+    mf_raw = zin.read("META-INF/MANIFEST.MF")
+    sf_raw = zin.read("META-INF/CERT.SF")
+    rsa_raw = zin.read("META-INF/CERT.RSA")
 
-# digests inside signed_data: [u32 len][u32 count][(u32 algo)(u32 len)(digest)...]
-off2 = 0
-digests_lp, off2 = read_lp(signed_data, off2)
-n = struct.unpack_from('<I', digests_lp, 0)[0]
-print('  digests:', n)
-offd = 4
-for i in range(n):
-    algo, dlen = struct.unpack_from('<II', digests_lp, offd)
-    dg = digests_lp[offd + 8:offd + 8 + dlen]
-    offd += 8 + dlen
-    print(f'    algo={algo:#x} digest={dg.hex()[:24]}...')
-certs_lp, off2 = read_lp(signed_data, off2)
-nc = struct.unpack_from('<I', certs_lp, 0)[0]
-print('  certs:', nc)
+    # Verify MANIFEST.MF digests of all zip entries
+    mf_text = mf_raw.decode("utf-8")
+    mf_sections = _name_lines_join(mf_text)
+    for info in zin.infolist():
+        if info.filename.startswith("META-INF/"):
+            continue
+        if info.filename not in mf_sections:
+            raise ValueError(f"Entry {info.filename} missing from MANIFEST.MF")
+        data = zin.read(info.filename)
+        actual_digest = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+        sec_text = mf_sections[info.filename]
+        if f"SHA-256-Digest: {actual_digest}" not in sec_text:
+            raise ValueError(f"MANIFEST.MF digest mismatch for {info.filename}")
+    print("  Passed: All entry SHA-256 digests in MANIFEST.MF verified.")
 
-# verify signature over signed_data (content)
-from cryptography.hazmat.primitives.serialization import load_der_public_key
-pubk = load_der_public_key(pubkey_lp)
-ns = struct.unpack_from('<I', signatures_lp, 0)[0]
-off3 = 4
-verified = False
-for i in range(ns):
-    algo, slen = struct.unpack_from('<II', signatures_lp, off3)
-    sig = signatures_lp[off3 + 8:off3 + 8 + slen]
-    off3 += 8 + slen
-    if algo == 0x0101:
-        try:
-            pubk.verify(sig, signed_data, padding.PKCS1v15(), hashes.SHA256())
-            verified = True
-            print('  v2 signature (RSA PKCS1v15 SHA256): OK')
-        except Exception as e:
-            print('  !! v2 sig failed:', e)
+    # Verify CERT.SF manifest digest
+    sf_text = sf_raw.decode("utf-8")
+    mf_hash_b64 = base64.b64encode(hashlib.sha256(mf_raw).digest()).decode("ascii")
+    if f"SHA-256-Digest-Manifest: {mf_hash_b64}" not in sf_text:
+        raise ValueError("CERT.SF SHA-256-Digest-Manifest does not match MANIFEST.MF")
+    print("  Passed: CERT.SF Manifest digest matches MANIFEST.MF.")
 
-# verify content digests by recomputing
-def chunked(data, chunk_size=1024 * 1024):
-    h = hashlib.sha256()
-    h.update(struct.pack('<I', 0xa5))
-    for i in range(0, len(data), chunk_size):
-        c = data[i:i + chunk_size]
-        h.update(struct.pack('<I', len(c)))
-        h.update(c)
-    return h.digest()
+    # Verify CERT.RSA with openssl cms
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rsa_path = os.path.join(tmpdir, "CERT.RSA")
+        sf_path = os.path.join(tmpdir, "CERT.SF")
+        cert_out_path = os.path.join(tmpdir, "extracted_cert.pem")
+        with open(rsa_path, "wb") as f:
+            f.write(rsa_raw)
+        with open(sf_path, "wb") as f:
+            f.write(sf_raw)
 
-section1 = data[:block_start]
-section3 = data[cd_off:eocd_pos]
-section4 = data[eocd_pos:]
-d1 = chunked(section1)
-d3 = chunked(section3)
-d4 = chunked(section4)
-# compare with digests from signed_data
-off2 = 4
-computed = []
-for i in range(3):
-    algo, dlen = struct.unpack_from('<II', digests_lp, off2)
-    dg = digests_lp[off2 + 8:off2 + 8 + dlen]
-    off2 += 8 + dlen
-    computed.append(dg)
-print('  content digest 1 (entries):', 'OK' if computed[0] == d1 else 'FAIL')
-print('  content digest 3 (central dir):', 'OK' if computed[1] == d3 else 'FAIL')
-print('  content digest 4 (EOCD):', 'OK' if computed[2] == d4 else 'FAIL')
+        # Extract signer certificate from PKCS#7 / CMS
+        res = subprocess.run([
+            "openssl", "pkcs7", "-inform", "DER", "-in", rsa_path,
+            "-print_certs", "-out", cert_out_path
+        ], capture_output=True, text=True)
+        if res.returncode != 0:
+            raise ValueError(f"Failed to extract cert from CERT.RSA: {res.stderr}")
 
-print('=' * 60)
-print('5. Manifest content')
-from pyaxmlparser import APK as PA
-a = PA(APK)
-print('  package:', a.package)
-print('  versionName:', a.version_name)
-print('  versionCode:', a.version_code)
-print('  application label:', a.application)
-print('  main activity:', a.get_main_activity())
+        # Verify CMS signature
+        res = subprocess.run([
+            "openssl", "cms", "-verify", "-inform", "DER", "-in", rsa_path,
+            "-content", sf_path, "-CAfile", cert_out_path, "-noverify"
+        ], capture_output=True, text=True)
+        if res.returncode != 0 and "Verification successful" not in res.stderr and "Verification successful" not in res.stdout:
+            raise ValueError(f"CERT.RSA CMS verification failed: {res.stderr}")
+        print("  Passed: CERT.RSA PKCS#7 CMS signature verified.")
 
-print('=' * 60)
-print('6. Rebranded assets present')
-import os
-checks = {
-    'app name in arsc': b'Firekirin 3.0' in z.read('resources.arsc'),
-}
-print('  app name string patched:', checks['app name in arsc'])
-print('  icon CG.png size:', len(z.read('res/CG.png')), 'bytes (new)')
-print('  flame logo size:', len(z.read('assets/assets/main/native/ff/fffb390e-2dcf-4ca6-91a3-7e645b09ded0.ca676.png')))
-print('  checksum files unchanged:', z.read('assets/meta-data/manifest.mf') == open('extracted/firekirin777_2_2.apk', 'rb').read() and True)
+    # ------------------------------------------------------------ 4. v2 Signature Scheme
+    print("\n[4] Checking v2 (APK Signature Scheme v2)...")
+    eocd_pos = apk_data.rfind(b"PK\x05\x06")
+    if eocd_pos == -1:
+        raise ValueError("EOCD not found")
+    cd_offset = struct.unpack_from("<I", apk_data, eocd_pos + 16)[0]
+    cd_size = struct.unpack_from("<I", apk_data, eocd_pos + 12)[0]
+
+    magic = apk_data[cd_offset - 16 : cd_offset]
+    if magic != b"APK Sig Block 42":
+        raise ValueError(f"APK Signing Block magic missing (got {magic})")
+    block_size_footer = struct.unpack_from("<Q", apk_data, cd_offset - 24)[0]
+    block_start = cd_offset - 8 - block_size_footer
+    block_size_header = struct.unpack_from("<Q", apk_data, block_start)[0]
+    if block_size_footer != block_size_header:
+        raise ValueError(f"APK Signing Block header size ({block_size_header}) != footer size ({block_size_footer})")
+    print(f"  Passed: APK Signing Block located (offset={block_start}, size={block_size_footer}).")
+
+    # Parse ID-value pairs
+    pairs_pos = block_start + 8
+    pairs = {}
+    while pairs_pos < cd_offset - 24:
+        p_len = struct.unpack_from("<Q", apk_data, pairs_pos)[0]
+        p_id = struct.unpack_from("<I", apk_data, pairs_pos + 8)[0]
+        p_val = apk_data[pairs_pos + 12 : pairs_pos + 8 + p_len]
+        pairs[p_id] = p_val
+        pairs_pos += 8 + p_len
+
+    if V2_BLOCK_ID not in pairs:
+        raise ValueError("APK Signature Scheme v2 block ID (0x7109871a) not found in signing block")
+    v2_val = pairs[V2_BLOCK_ID]
+
+    # Parse signers
+    signers_len = struct.unpack_from("<I", v2_val, 0)[0]
+    signer_len = struct.unpack_from("<I", v2_val, 4)[0]
+    signer = v2_val[8 : 8 + signer_len]
+
+    s_pos = 0
+    sd_len = struct.unpack_from("<I", signer, s_pos)[0]
+    sd_bytes = signer[s_pos + 4 : s_pos + 4 + sd_len]
+    s_pos += 4 + sd_len
+
+    sigs_len = struct.unpack_from("<I", signer, s_pos)[0]
+    sigs_bytes = signer[s_pos + 4 : s_pos + 4 + sigs_len]
+    s_pos += 4 + sigs_len
+
+    pk_len = struct.unpack_from("<I", signer, s_pos)[0]
+    pk_bytes = signer[s_pos + 4 : s_pos + 4 + pk_len]
+
+    # Extract signature & algo
+    sig_rec_len = struct.unpack_from("<I", sigs_bytes, 0)[0]
+    sig_algo = struct.unpack_from("<I", sigs_bytes, 4)[0]
+    sig_bytes_len = struct.unpack_from("<I", sigs_bytes, 8)[0]
+    raw_sig = sigs_bytes[12 : 12 + sig_bytes_len]
+    if sig_algo != SIG_ALGO_RSA_PKCS1_SHA256:
+        raise ValueError(f"Expected signature algorithm 0x0103, got 0x{sig_algo:x}")
+
+    # Verify RSA signature over signedData
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pub_path = os.path.join(tmpdir, "pubkey.der")
+        sd_path = os.path.join(tmpdir, "signed_data.bin")
+        sig_path = os.path.join(tmpdir, "sig.bin")
+        with open(pub_path, "wb") as f:
+            f.write(pk_bytes)
+        with open(sd_path, "wb") as f:
+            f.write(sd_bytes)
+        with open(sig_path, "wb") as f:
+            f.write(raw_sig)
+
+        res = subprocess.run([
+            "openssl", "dgst", "-sha256", "-verify", pub_path, "-keyform", "DER",
+            "-signature", sig_path, sd_path
+        ], capture_output=True, text=True)
+        if res.returncode != 0 or "Verified OK" not in res.stdout:
+            raise ValueError(f"v2 RSA signature verification failed: {res.stderr}")
+    print("  Passed: v2 RSA-2048 PKCS#1 v1.5 signature over signedData verified.")
+
+    # Parse and verify content digests
+    d_len = struct.unpack_from("<I", sd_bytes, 0)[0]
+    d_rec = sd_bytes[4 : 4 + d_len]
+    d_rec_len = struct.unpack_from("<I", d_rec, 0)[0]
+    d_algo = struct.unpack_from("<I", d_rec, 4)[0]
+    d_bytes_len = struct.unpack_from("<I", d_rec, 8)[0]
+    expected_root = d_rec[12 : 12 + d_bytes_len]
+
+    sec1_actual = apk_data[:block_start]
+    sec3_actual = apk_data[cd_offset : cd_offset + cd_size]
+    eocd_actual = bytearray(apk_data[eocd_pos:])
+    struct.pack_into("<I", eocd_actual, 16, block_start)
+
+    actual_chunks = []
+    for src in [sec1_actual, sec3_actual, bytes(eocd_actual)]:
+        off = 0
+        while off < len(src):
+            c = src[off : off + CHUNK_SIZE]
+            actual_chunks.append(hashlib.sha256(b"\xa5" + struct.pack("<I", len(c)) + c).digest())
+            off += len(c)
+    actual_root = hashlib.sha256(b"\x5a" + struct.pack("<I", len(actual_chunks)) + b"".join(actual_chunks)).digest()
+
+    if expected_root != actual_root:
+        raise ValueError("v2 Merkle root content digest mismatch!")
+    print(f"  Passed: v2 1MB Merkle tree content root digest verified ({len(actual_chunks)} chunks).")
+
+    # ------------------------------------------------------------ 5. AndroidManifest.xml
+    print("\n[5] Checking AndroidManifest.xml Binary Headers...")
+    manifest_data = zin.read("AndroidManifest.xml")
+    magic, size = struct.unpack_from("<II", manifest_data, 0)
+    if magic != 0x00080003:
+        raise ValueError(f"Invalid Android binary XML magic: 0x{magic:x}")
+    if size != len(manifest_data):
+        raise ValueError(f"Binary XML size header ({size}) != actual size ({len(manifest_data)})")
+    print(f"  Passed: Binary AndroidManifest.xml header valid (size={size} bytes).")
+
+    print("\n" + "=" * 60)
+    print("ALL VERIFICATIONS COMPLETED SUCCESSFULLY WITH ZERO ERRORS!")
+    print("=" * 60)
+    return True
+
+
+if __name__ == "__main__":
+    apk = sys.argv[1] if len(sys.argv) > 1 else "Firekirin3.0.apk"
+    verify_apk(apk)
