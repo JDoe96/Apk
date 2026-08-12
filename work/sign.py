@@ -34,7 +34,7 @@ class ZipWriter:
         if not compress:
             method = zipfile.ZIP_STORED
             comp = data
-            genflag = 0
+            genflag = 0x0800  # UTF-8 filename flag (matches original APK)
         else:
             method = zipfile.ZIP_DEFLATED
             co = zlib.compressobj(9, zlib.DEFLATED, -15)
@@ -44,9 +44,13 @@ class ZipWriter:
         name_bytes = name.encode("utf-8")
         extra = b""
         if align > 1:
-            # Data starts at: self.offset + 30 + len(name_bytes) + len(extra)
-            pad = (-(self.offset + 30 + len(name_bytes))) % align
-            extra = b"\x00" * pad
+            # Android zipalign extra (id 0xd935): uint16 alignment + padding.
+            # Data payload starts at offset + 30 + len(name) + len(extra).
+            # extra = id(2) + size(2) + alignment(2) + pad
+            header_plus_name = self.offset + 30 + len(name_bytes)
+            min_extra = 6
+            pad = (-(header_plus_name + min_extra)) % align
+            extra = struct.pack("<HHH", 0xD935, 2 + pad, align) + (b"\x00" * pad)
 
         local_hdr = struct.pack(
             "<IHHHHHIIIHH",
