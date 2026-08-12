@@ -17,11 +17,16 @@ args = [a for a in sys.argv[1:] if not a.startswith("--")]
 OUT_UNSIGNED = args[0] if len(args) > 0 else os.path.join(WORK_DIR, "Firekirin3.0-unsigned.apk")
 
 compatible_mode = "--compatible" in sys.argv or "--icons-only" in sys.argv
-if compatible_mode:
+name_only_mode = "--name-only" in sys.argv
+if name_only_mode:
+    print("Running in name-only mode: modifying only resources.arsc (app name).")
+elif compatible_mode:
     print("Running in compatible mode: modifying only resources.arsc (app name) and res/ icons.")
 
 # Files that were modified (path in zip -> workspace file)
 MODIFIED = {
+    "resources.arsc": os.path.join(WORK_DIR, "resources.arsc"),
+} if name_only_mode else {
     "resources.arsc": os.path.join(WORK_DIR, "resources.arsc"),
     "res/u3.png": os.path.join(WORK_DIR, "res/u3.png"),
     "res/SD.png": os.path.join(WORK_DIR, "res/SD.png"),
@@ -45,9 +50,11 @@ MODIFIED = {
     "res/DF.png": os.path.join(WORK_DIR, "res/DF.png"),
 }
 
-if not compatible_mode:
+# AndroidManifest.xml is intentionally left byte-identical to the original
+# (versionName 1.2.5 / versionCode 2). It is listed in the in-app integrity
+# manifest, so replacing it would abort startup even if the XML is equivalent.
+if not compatible_mode and not name_only_mode:
     MODIFIED.update({
-        "AndroidManifest.xml": os.path.join(WORK_DIR, "AndroidManifest.xml"),
         "assets/assets/main/native/ff/fffb390e-2dcf-4ca6-91a3-7e645b09ded0.ca676.png": os.path.join(WORK_DIR, "assets/assets/main/native/ff/fffb390e-2dcf-4ca6-91a3-7e645b09ded0.ca676.png"),
         "assets/assets/main/native/f3/f30ec3a6-59d0-49e3-8542-119734dc2357.4d3f2.png": os.path.join(WORK_DIR, "assets/assets/main/native/f3/f30ec3a6-59d0-49e3-8542-119734dc2357.4d3f2.png"),
         "assets/assets/resources/native/15/150618f7-d19f-4fda-b4be-bbefd88852d2.7ed3d.png": os.path.join(WORK_DIR, "assets/assets/resources/native/15/150618f7-d19f-4fda-b4be-bbefd88852d2.7ed3d.png"),

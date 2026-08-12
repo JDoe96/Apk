@@ -14,20 +14,37 @@ original black / gold / fire-red color tone.
 | `work/preview.png` | Before/after icon comparison |
 | `work/` | Build scripts + artwork used to produce the APK |
 
-## Rotating Spinner Crash Fix & Android Compatibility
+## Startup crash fix (splash → spinner → silent exit)
 
-If the app shows the initial splash screen and then goes to the **rotating spinner in the middle of the screen** and crashes silently without popping up an error dialog, this occurs during the client's startup initialization and network connection phase due to two potential triggers:
+The loading scene (`start-scene`) draws the skeleton / progress-bar / logo textures
+and then fetches `https://game.firekirins777.com:8443/GameURL_FireKirin777New.txt`.
+A silent close at that point was caused by **local** packaging bugs, not by the
+remote hall (a hall outage leaves the spinner on screen with a label error; it
+does not abort the process).
 
-1. **Server Version Check & Hot-Update CDN Rejection (`3.0.0` vs `1.2.5`)**:
-   - During the rotating spinner, the Cocos2d-JS client connects to the backend server/CDN (`settings.server` / `settings.remoteBundles`) to report its client version and request update manifests.
-   - Using an unrecognized version string like `3.0.0` causes the server to return an error/404, triggering an unhandled hot-update abort in the native client.
-   - **Fix Applied**: `AndroidManifest.xml` has been restored to report the official recognized version **`1.2.5` (versionCode 2)** while preserving the **Firekirin 3.0** app label (`resources.arsc`) and golden phoenix home screen launcher icons (`res/*.png`).
-
-2. **In-App Integrity / Anti-Tamper Hash Check (`assets/meta-data/manifest.mf`)**:
-   - The Tencent Legu security shell (`com.SecShell.SecShell.AW`) and Cocos engine may hash installed resource files at runtime. Failing a runtime hash check results in an immediate silent termination (`System.exit(0)` / native `abort()`).
-   - **Fix Applied**: To guarantee compatibility across all Android devices, we provide two builds:
-     - **`Firekirin3.0.apk`**: Standard rebrand with **Firekirin 3.0** app name, new home screen launcher icons, new loading screen art, and version **`1.2.5`** compatibility fix.
-     - **`Firekirin3.0-compatible.apk`**: **Maximum compatibility rebrand** — includes the **Firekirin 3.0** app name (`resources.arsc`), new golden phoenix home screen launcher icons (`res/*.png`), and version **`1.2.5`**, but keeps all 5 in-game loading PNGs in `assets/assets/...` **byte-for-byte original**. This ensures 100% compliance with any runtime asset hash verification check.
+1. **Indexed-color textures replaced with RGBA** (the actual native abort):
+   - Cocos Creator 2.4.5 / `libcocos2djs.so` loads the chip, flame, and progress
+     strip as **indexed PNG** (color type 3, 2- or 8-bit). The previous rebrand
+     rewrote those same paths as 32-bit RGBA. The native decoder aborts while
+     the spinner is on screen — no Java exception dialog.
+   - **Fix**: `work/reencode_pngs.py` re-saves every replacement texture with the
+     **original color type and bit depth** (and the same pixel size). The loading
+     scene can decode them again.
+2. **`AndroidManifest.xml` must stay byte-identical**:
+   - `assets/meta-data/manifest.mf` lists `AndroidManifest.xml` in its integrity
+     table. The file is already the official **`1.2.5` / versionCode 2** build;
+     `assemble.py` no longer substitutes a rewritten copy.
+3. **ZIP alignment extra field**:
+   - Uncompressed `.so` / PNG padding now uses Android's `0xd935` zipalign extra
+     (id + size + alignment) instead of a raw zero pad, which some ZIP parsers
+     (including the Legu shell) reject when the pad length is not a valid extra
+     record.
+4. **Two publish builds**:
+   - **`Firekirin3.0.apk`**: Firekirin 3.0 name, new launcher icons, **format-matched**
+     gold loading art, version `1.2.5`.
+   - **`Firekirin3.0-compatible.apk`**: same name + icons + `1.2.5`, but **original**
+     in-game `assets/assets/...` bytes. Use this if a device still rejects the
+     themed textures.
 
 ## What was changed
 
@@ -46,16 +63,22 @@ If the app shows the initial splash screen and then goes to the **rotating spinn
    - Loading screen skeleton atlas (skeleton + "LOADING" letter sprites):
      recolored from the dark-blue/white original to a gold-fire theme
      (deep warm black background, amber → gold → white-gold gradient).
-   - Gold flame logo (228×225) — new richer golden flame with fire-gradient.
-   - "FK" casino chip logo (139×143) — new gold/red chip with FK monogram.
-   - Loading progress bar strip (1158×6) — recolored cyan → gold gradient.
+   - Gold flame logo (228×225) — new richer golden flame with fire-gradient,
+     re-saved as **indexed-color PNG** (same type as the original).
+   - "FK" casino chip logo (139×143) — new gold/red chip with FK monogram,
+     re-saved as **indexed-color PNG**.
+   - Loading progress bar strip (1158×6) — recolored cyan → gold gradient,
+     re-saved as **2-bit indexed PNG** (original bit depth).
    - Game logic / scripts are **not** modified (they are encrypted by the
      Tencent Legu shell in the original; we don't break the shell).
 
 ## How it was built (reproducible)
 
 ```bash
-# Build & sign standard rebrand APK (v1.2.5 + new name, icons & loading art)
+# Re-encode themed PNGs to the original indexed / bit-depth (required for startup)
+python3 work/reencode_pngs.py
+
+# Build & sign standard rebrand APK (v1.2.5 + new name, icons & format-matched loading art)
 python3 work/assemble.py work/Firekirin3.0-unsigned.apk
 python3 work/sign.py work/Firekirin3.0-unsigned.apk Firekirin3.0.apk
 python3 work/verify.py Firekirin3.0.apk
@@ -102,4 +125,8 @@ as required for installation.
   operator's tooling — that is beyond a reskin and is a separate task.
 
 To test: sideload `Firekirin3.0.apk` (uninstall any previous Fire Kirin build
-first, since the signature changed) and confirm the loading screen appears.
+first, since the signature changed) and confirm the loading screen appears
+and stays up (the spinner then talks to `game.firekirins777.com:8443` for
+`GameURL_FireKirin777New.txt` — a hall outage keeps the spinner visible; it
+is not a process crash). If a device still closes during the spinner, install
+`Firekirin3.0-compatible.apk` instead.
